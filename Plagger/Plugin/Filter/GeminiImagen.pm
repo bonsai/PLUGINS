@@ -1,0 +1,266 @@
+package Plagger::Plugin::Filter::GeminiImagen;
+
+use strict;
+use warnings;
+use base qw( Plagger::Plugin );
+
+use LWP::UserAgent;
+use JSON::XS;
+use MIME::Base64;
+use File::Spec;
+use File::Path qw(make_path);
+
+sub register {
+    my ($self, $context) = @_;
+    $context->register_hook(
+        $self,
+        'update.feed.fixup' => \&filter,
+    );
+}
+
+sub init {
+    my $self = shift;
+    
+    # 設定値の検証
+    $self->{api_key} = $self->conf->{api_key} 
+        or Plagger->context->error("api_key is required");
+    
+    $self->{model} = $self->conf->{model} || 'imagen-3.0-generate-001';
+    $self->{output_dir} = $self->conf->{output_dir} || './images';
+    $self->{image_format} = $self->conf->{image_format} || 'png';
+    $self->{aspect_ratio} = $self->conf->{aspect_ratio} || '1:1';
+    $self->{safety_filter_level} = $self->conf->{safety_filter_level} || 'block_some';
+    $self->{person_generation} = $self->conf->{person_generation} || 'dont_allow';
+    
+    # 出力ディレクトリの作成
+    make_path($self->{output_dir}) unless -d $self->{output_dir};
+    
+    # User Agentの初期化
+    $self->{ua} = LWP::UserAgent->new(
+        timeout => 60,
+        agent => 'Plagger-GeminiImagen/1.0',
+    );
+}
+
+sub filter {
+    my ($self, $context, $args) = @_;
+    my $feed = $args->{feed};
+    
+    for my $entry (@{$feed->entries}) {
+        $self->process_entry($entry);
+    }
+}
+
+sub process_entry {
+    my ($self, $entry) = @_;
+    
+    # エントリーのタイトルと本文からプロンプトを生成
+    my $prompt = $self->generate_prompt($entry);
+    
+    if ($prompt) {
+        Plagger->context->log(info => "Generating image for: $prompt");
+        
+        my $image_data = $self->generate_image($prompt);
+        
+        if ($image_data) {
+            my $image_path = $self->save_image($image_data, $entry);
+            if ($image_path) {
+                # エントリーに画像情報を追加
+                $self->add_image_to_entry($entry, $image_path, $prompt);
+            }
+        }
+    }
+}
+
+sub generate_prompt {
+    my ($self, $entry) = @_;
+    
+    my $title = $entry->title || '';
+    my $body = $entry->body || '';
+    
+    # HTMLタグを除去
+    $body =~ s/<[^>]+>//g;
+    
+    # プロンプト生成のロジック
+    my $prompt = '';
+    
+    if ($self->conf->{prompt_template}) {
+        # テンプレートが指定されている場合
+        $prompt = $self->conf->{prompt_template};
+        $prompt =~ s/\{title\}/$title/g;
+        $prompt =~ s/\{body\}/$body/g;
+    } else {
+        # デフォルトのプロンプト生成
+        if ($title) {
+            $prompt = "Create an illustration for: $title";
+            if (length($body) > 0 && length($body) < 200) {
+                $prompt .= ". Context: " . substr($body, 0, 200);
+            }
+        }
+    }
+    
+    return length($prompt) > 10 ? $prompt : undef;
+}
+
+sub generate_image {
+    my ($self, $prompt) = @_;
+    
+    my $url = "https://generativelanguage.googleapis.com/v1beta/models/" . 
+              $self->{model} . ":generateImage?key=" . $self->{api_key};
+    
+    my $request_data = {
+        prompt => {
+            text => $prompt
+        },
+        generationConfig => {
+            aspectRatio => $self->{aspect_ratio},
+            outputMimeType => "image/" . $self->{image_format},
+            safetyFilterLevel => $self->{safety_filter_level},
+            personGeneration => $self->{person_generation},
+        }
+    };
+    
+    my $response = $self->{ua}->post(
+        $url,
+        'Content-Type' => 'application/json',
+        Content => encode_json($request_data)
+    );
+    
+    if ($response->is_success) {
+        my $result = decode_json($response->content);
+        
+        if ($result->{candidates} && @{$result->{candidates}}) {
+            my $image_b64 = $result->{candidates}->[0]->{image};
+            return decode_base64($image_b64);
+        } else {
+            Plagger->context->log(error => "No image generated: " . $response->content);
+            return undef;
+        }
+    } else {
+        Plagger->context->log(error => "API request failed: " . $response->status_line);
+        return undef;
+    }
+}
+
+sub save_image {
+    my ($self, $image_data, $entry) = @_;
+    
+    # ファイル名の生成
+    my $title = $entry->title || 'untitled';
+    $title =~ s/[^\w\-_]/_/g;  # ファイル名に使えない文字を置換
+    $title = substr($title, 0, 50);  # 長さ制限
+    
+    my $timestamp = time();
+    my $filename = sprintf("%s_%d.%s", $title, $timestamp, $self->{image_format});
+    my $filepath = File::Spec->catfile($self->{output_dir}, $filename);
+    
+    # 画像ファイルの保存
+    if (open my $fh, '>', $filepath) {
+        binmode $fh;
+        print $fh $image_data;
+        close $fh;
+        
+        Plagger->context->log(info => "Image saved: $filepath");
+        return $filepath;
+    } else {
+        Plagger->context->log(error => "Failed to save image: $!");
+        return undef;
+    }
+}
+
+sub add_image_to_entry {
+    my ($self, $entry, $image_path, $prompt) = @_;
+    
+    # エントリーの本文に画像を追加
+    my $image_html = sprintf(
+        '<div class="generated-image"><img src="%s" alt="%s" style="max-width:100%%;"/><p><em>Generated by Gemini Imagen: %s</em></p></div>',
+        $image_path,
+        $prompt,
+        $prompt
+    );
+    
+    my $current_body = $entry->body || '';
+    $entry->body($image_html . $current_body);
+    
+    # カスタムフィールドとして画像情報を保存
+    $entry->meta->{generated_image} = {
+        path => $image_path,
+        prompt => $prompt,
+        timestamp => time(),
+    };
+}
+
+1;
+
+__END__
+
+=head1 NAME
+
+Plagger::Plugin::Filter::GeminiImagen - Generate images using Google Gemini Imagen API
+
+=head1 SYNOPSIS
+
+  plugins:
+    - module: Filter::GeminiImagen
+      config:
+        api_key: your_gemini_api_key
+        model: imagen-3.0-generate-001
+        output_dir: ./generated_images
+        image_format: png
+        aspect_ratio: "1:1"
+        safety_filter_level: block_some
+        person_generation: dont_allow
+        prompt_template: "Create an artistic illustration for: {title}"
+
+=head1 DESCRIPTION
+
+This plugin generates images using Google's Gemini Imagen API based on feed entry content.
+It processes each entry's title and body to create prompts for image generation.
+
+=head1 CONFIG OPTIONS
+
+=over 4
+
+=item api_key (required)
+
+Your Google Gemini API key.
+
+=item model
+
+The Imagen model to use. Default: imagen-3.0-generate-001
+
+=item output_dir
+
+Directory to save generated images. Default: ./images
+
+=item image_format
+
+Output image format (png, jpeg). Default: png
+
+=item aspect_ratio
+
+Image aspect ratio (1:1, 9:16, 16:9, 4:3, 3:4). Default: 1:1
+
+=item safety_filter_level
+
+Safety filter level (block_most, block_some, block_few, block_none). Default: block_some
+
+=item person_generation
+
+Person generation policy (allow, dont_allow). Default: dont_allow
+
+=item prompt_template
+
+Custom prompt template. Use {title} and {body} placeholders.
+
+=back
+
+=head1 AUTHOR
+
+Your Name
+
+=head1 SEE ALSO
+
+L<Plagger>, L<https://ai.google.dev/gemini-api/docs/imagen>
+
+=cut
