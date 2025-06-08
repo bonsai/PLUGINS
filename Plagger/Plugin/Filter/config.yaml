@@ -63,3 +63,29 @@ global:
 
 log:
   level: info
+
+#---------------------------------------------------
+# Filter::Extraction Example
+#---------------------------------------------------
+  - module: Filter::Extraction
+    config:
+      # Example 1: Extract ISBN numbers from entry body or title
+      # pattern: 'ISBN(?:-1[03])?:?\s*([0-9]{9}[0-9X]|[0-9]{12}[0-9X])'
+      # field_name: 'isbn_numbers'
+
+      # Example 2: Extract email addresses
+      pattern: '([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+      field_name: 'emails_found'
+
+#---------------------------------------------------
+# Filter::Translation Example
+#---------------------------------------------------
+  - module: Filter::Translation
+    config:
+      target_language: "de"  # Translate to German
+      # api_key: "YOUR_TRANSLATION_SERVICE_API_KEY" # Replace with actual key
+      # service_url: "https://your.translation.service/api/translate" # Replace with actual URL
+      fields_to_translate:
+        - title
+        - body
+      # strip_html_before_translate: 1 # Uncomment to strip HTML from body before translation

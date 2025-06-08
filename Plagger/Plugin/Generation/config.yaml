@@ -1,0 +1,55 @@
+# Plagger configuration example for Generation::Quiz plugin
+
+plugins:
+  # Example: Subscribe to a blog feed
+  - module: Subscription::Config
+    config:
+      feeds:
+        - url: https://example-blog.com/feed
+
+  # Quiz Generation Plugin
+  - module: Generation::Quiz
+    config:
+      num_questions: 5       # Number of questions to generate per entry
+      difficulty: 'medium'   # Desired difficulty (easy, medium, hard) - for future use
+
+  # Example: Publish to HTML
+  - module: Publish::HTML
+    config:
+      dir: ./output_quiz_html
+      template: |
+        <!DOCTYPE html>
+        <html>
+        <head><title>{{feed.title}} - Quizzes</title></head>
+        <body>
+          <h1>{{feed.title}} - Quizzes</h1>
+          {{#entries}}
+          <div>
+            <h2><a href="{{permalink}}">{{title}}</a></h2>
+            <div>{{body}}</div>
+            {{#meta.quiz}}
+            <h3>Quiz for "{{title}}"</h3>
+            <ol>
+              {{#.}}
+              <li>
+                <p><strong>{{question}}</strong></p>
+                <ul>{{#options}}<li>{{.}}</li>{{/options}}</ul>
+                <p><em>Answer: {{answer}}</em></p>
+              </li>
+              {{/.}}
+            </ol>
+            {{/meta.quiz}}
+          </div>
+          <hr>
+          {{/entries}}
+        </body>
+        </html>
+
+global:
+  timezone: Asia/Tokyo
+  cache:
+    class: Cache::File
+    root: /tmp/plagger-quiz-cache
+
+log:
+  level: info
